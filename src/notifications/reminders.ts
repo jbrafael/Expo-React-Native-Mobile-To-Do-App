@@ -147,8 +147,8 @@ export async function scheduleReminder(
       content: {
         title: 'TaskFlow',
         body: reminderBody(task.title),
-        // The due date is stored in the payload so reconciliation can compare it on every
-        // platform (iOS reports date triggers back as relative `timeInterval` triggers).
+        // The due date is stored in the payload so the fire time can be shown on every platform
+        // (iOS reports date triggers back as relative `timeInterval` triggers).
         data: { taskId: task.id, dueDateTime: task.dueDateTime },
       },
       trigger: {
@@ -168,9 +168,10 @@ export async function scheduleReminder(
 export const rescheduleReminder = scheduleReminder;
 
 export interface ReconcileReport {
+  /** Task ids whose reminder was (re-)armed. */
   scheduled: number[];
+  /** Identifiers of app reminders that were removed. */
   cancelled: string[];
-  kept: number[];
   failed: number[];
   permission: PermissionState;
 }
@@ -178,9 +179,13 @@ export interface ReconcileReport {
 /**
  * Makes the OS's scheduled reminders match the persisted tasks:
  * - cancels app reminders whose task no longer exists, is completed, or is past due;
- * - cancels reminders whose trigger date no longer matches the task's due date;
- * - schedules reminders for eligible tasks that have none.
- * Idempotent: running it twice leaves exactly one reminder per eligible task.
+ * - re-arms the reminder of **every** eligible task (cancel + schedule, same identifier).
+ *
+ * Re-arming instead of trusting `getAllScheduledNotificationsAsync()` is deliberate: on Android
+ * that call reads expo-notifications' persisted request store, which survives a force-stop even
+ * though the OS has deleted the underlying AlarmManager alarms (verified on an emulator, see
+ * BUILD_LOG.md Entry 9). Because the identifier is deterministic, re-arming is idempotent:
+ * running it any number of times leaves exactly one reminder per eligible task.
  *
  * Does not prompt for permission (startup should not ambush the user); if permission is not
  * granted, nothing new is scheduled.
@@ -192,7 +197,6 @@ export async function reconcileReminders(
   const report: ReconcileReport = {
     scheduled: [],
     cancelled: [],
-    kept: [],
     failed: [],
     permission: 'undetermined',
   };
@@ -210,35 +214,23 @@ export async function reconcileReminders(
     console.warn('[reminders] could not list scheduled notifications', error);
   }
 
-  const eligible = new Map(
-    tasks.filter((t) => isReminderEligible(t, now)).map((t) => [t.id, t] as const),
-  );
-  const alreadyScheduled = new Set<number>();
+  const eligible = tasks.filter((t) => isReminderEligible(t, now));
+  const eligibleIds = new Set(eligible.map((t) => t.id));
 
   for (const request of existing) {
     const taskId = taskIdFromIdentifier(request.identifier);
-    if (taskId === null) continue; // not ours
-    const task = eligible.get(taskId);
-    const scheduledFor = request.content.data?.dueDateTime;
-    const matches =
-      task !== undefined && scheduledFor === task.dueDateTime && !alreadyScheduled.has(taskId);
-    if (matches) {
-      alreadyScheduled.add(taskId);
-      report.kept.push(taskId);
-    } else {
-      try {
-        await Notifications.cancelScheduledNotificationAsync(request.identifier);
-        report.cancelled.push(request.identifier);
-      } catch (error) {
-        console.warn(`[reminders] reconcile cancel failed for ${request.identifier}`, error);
-      }
+    if (taskId === null || eligibleIds.has(taskId)) continue; // not ours, or re-armed below
+    try {
+      await Notifications.cancelScheduledNotificationAsync(request.identifier);
+      report.cancelled.push(request.identifier);
+    } catch (error) {
+      console.warn(`[reminders] reconcile cancel failed for ${request.identifier}`, error);
     }
   }
 
   if (report.permission !== 'granted') return report;
 
-  for (const task of eligible.values()) {
-    if (alreadyScheduled.has(task.id)) continue;
+  for (const task of eligible) {
     const result = await scheduleReminder(task, now);
     if (result.status === 'scheduled') report.scheduled.push(task.id);
     else report.failed.push(task.id);

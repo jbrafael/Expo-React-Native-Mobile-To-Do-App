@@ -3,6 +3,10 @@
  * `jest.mock('expo-notifications', () => require('@/test/fakeNotifications').module)`.
  * It mimics the native behaviour that matters here: requests are keyed by identifier
  * (re-scheduling an identifier replaces it) and Android-style date triggers.
+ *
+ * `scheduled` models expo-notifications' persisted request store (what
+ * getAllScheduledNotificationsAsync returns); `alarms` models the OS AlarmManager entries that
+ * actually fire. `forceStop()` reproduces Android's force-stop: alarms vanish, the store stays.
  */
 export interface FakeRequest {
   identifier: string;
@@ -12,13 +16,18 @@ export interface FakeRequest {
 
 export const fake = {
   scheduled: new Map<string, FakeRequest>(),
+  alarms: new Set<string>(),
   permission: { granted: true, canAskAgain: true },
   /** Permission returned after a request prompt. */
   requestResult: { granted: true, canAskAgain: false },
   failSchedule: false,
   requestCount: 0,
+  forceStop() {
+    this.alarms.clear();
+  },
   reset() {
     this.scheduled.clear();
+    this.alarms.clear();
     this.permission = { granted: true, canAskAgain: true };
     this.requestResult = { granted: true, canAskAgain: false };
     this.failSchedule = false;
@@ -50,11 +59,13 @@ export const module = {
         content: req.content,
         trigger: { type: 'date', value: req.trigger.date.getTime(), channelId: req.trigger.channelId },
       });
+      fake.alarms.add(req.identifier);
       return req.identifier;
     },
   ),
   cancelScheduledNotificationAsync: jest.fn(async (id: string) => {
     fake.scheduled.delete(id);
+    fake.alarms.delete(id);
   }),
   getAllScheduledNotificationsAsync: jest.fn(async () => [...fake.scheduled.values()]),
 };

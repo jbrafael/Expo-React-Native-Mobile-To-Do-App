@@ -3,12 +3,16 @@ import { router, Stack } from 'expo-router';
 import { SQLiteProvider } from 'expo-sqlite';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useRef, useState } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { LogBox, StyleSheet, Text, View } from 'react-native';
 
 import { DATABASE_NAME, migrateDbIfNeeded } from '@/db/database';
 import { configureNotifications, taskIdFromIdentifier } from '@/notifications/reminders';
 import { TaskStoreProvider } from '@/state/TaskStore';
 import { useColors } from '@/theme/colors';
+
+// Expo Go (SDK 53+) logs this error when expo-notifications is imported because *remote* push is
+// unavailable there. TaskFlow only uses local notifications, which still work in Expo Go.
+LogBox.ignoreLogs(['expo-notifications: Android Push notifications']);
 
 // Set the foreground handler and Android channel as early as possible.
 configureNotifications().catch((error) => console.warn('[layout] configureNotifications', error));

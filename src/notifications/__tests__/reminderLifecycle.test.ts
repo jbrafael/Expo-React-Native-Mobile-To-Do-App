@@ -181,8 +181,8 @@ describe('lifecycle', () => {
     await reconcileReminders(all);
     const second = await reconcileReminders(all);
     expect(fake.scheduled.size).toBe(1);
-    expect(second.kept).toEqual([task.id]);
-    expect(second.scheduled).toEqual([]);
+    expect(fake.alarms.size).toBe(1);
+    expect(second.scheduled).toEqual([task.id]);
   });
 
   it('10. permission denial does not throw and reports the outcome', async () => {
@@ -230,7 +230,7 @@ describe('12. startup reconciliation', () => {
 
     const report = await reconcileReminders(await taskRepo.getAllTasks(db));
 
-    expect(report.cancelled.sort()).toEqual([`task-${done.id}`, `task-${moved.id}`, 'task-999'].sort());
+    expect(report.cancelled.sort()).toEqual([`task-${done.id}`, 'task-999'].sort());
     expect(report.scheduled.sort()).toEqual([pending.id, moved.id].sort());
     expect([...fake.scheduled.keys()].sort()).toEqual(
       [`task-${pending.id}`, `task-${moved.id}`, 'someone-else'].sort(),
@@ -238,6 +238,21 @@ describe('12. startup reconciliation', () => {
     expect(fake.scheduled.get(`task-${moved.id}`)!.trigger.value).toBe(
       new Date(moved.dueDateTime!).getTime(),
     );
+  });
+
+  it('re-arms reminders whose OS alarm was lost although the store still lists them (force-stop)', async () => {
+    const task = await taskRepo.insertTask(db, { ...base, dueDateTime: inHours(3) });
+    await reconcileReminders(await taskRepo.getAllTasks(db));
+    expect(fake.alarms.has(`task-${task.id}`)).toBe(true);
+
+    fake.forceStop(); // Android deletes the app's alarms; expo-notifications' store keeps the request
+    expect(fake.scheduled.has(`task-${task.id}`)).toBe(true);
+    expect(fake.alarms.size).toBe(0);
+
+    const report = await reconcileReminders(await taskRepo.getAllTasks(db));
+    expect(report.scheduled).toEqual([task.id]);
+    expect([...fake.alarms]).toEqual([`task-${task.id}`]);
+    expect(fake.scheduled.size).toBe(1);
   });
 
   it('does not prompt for permission and schedules nothing when not granted', async () => {

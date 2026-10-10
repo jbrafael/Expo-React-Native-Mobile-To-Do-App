@@ -294,3 +294,113 @@ Router directory contains only route files.
 
 ### Current Status
 Completed
+
+---
+
+## Entry 8 — Runtime validation on an Android emulator (Expo Go)
+
+**Date:** 2026-10-10 22:00–23:30 (-03:00) — emulator clock was GMT (23:0x)
+
+### Prompt / Request
+> "Run the application on an available Android emulator or physical device. Verify the acceptance criteria." / "For notification tests, inspect actual scheduled notifications and, when available, the operating system's notification UI. Distinguish between an alarm being scheduled and a notification actually being delivered."
+
+### Decision Summary
+- **Environment:** the only AVD on the machine is `TodoTestAVD` = **Android 8.0 (API 26), google_apis, x86**, running in the Windows emulator (`emulator.exe`) and controlled from WSL through Windows `adb.exe`. API 26 is above SDK 54's minSdk (24) but **below Android 13**, so the runtime `POST_NOTIFICATIONS` prompt cannot be exercised on it.
+- **Runtime:** Expo Go 54.0.8 (SDK 54 client, from `api.expo.dev/v2/versions`) — local notifications are supported in Expo Go. No development build yet (no JDK/Android SDK in WSL; see Entry 10).
+- **Evidence sources:** `uiautomator dump` (UI text/accessibility tree, driven by a scratch helper script `ui.sh` that taps by text/label), `dumpsys alarm` (pending AlarmManager alarms = *scheduled*), `dumpsys notification --noredact` (posted notifications = *delivered*), screenshots, and the on-device SQLite file read with `sqlite3` after `adb root`.
+
+### Actions Performed / environment problems
+1. `emulator.exe -avd TodoTestAVD` started, but `adb.exe devices` was empty. **Cause:** the WSL `adb` server I had started during Entry 1 was listening on port 5037, and WSL's localhost forwarding routed Windows `adb.exe` to it (the Linux server cannot see the Windows emulator). **Fix:** `adb kill-server` (WSL) then `adb.exe start-server` → `emulator-5554 device`, Android 8.0.0.
+2. Downloaded `Expo-Go-54.0.8.apk` and `adb.exe install -r` → Success.
+3. `CI=1 npx expo start --go --port 8081 --offline`, `adb.exe reverse tcp:8081 tcp:8081`, opened `exp://127.0.0.1:8081` → Expo Go **"Something went wrong"**; logcat: `Failed to download remote update … readResponseHeaders`. **Cause:** WSL2's localhost forwarding answered on Windows `[::1]:8081` but **not** `127.0.0.1:8081` (checked with PowerShell `Invoke-WebRequest`: IPv4 failed, IPv6 returned `packager-status:running`), and `adb reverse` uses IPv4. **Fix:** removed the reverse and opened `exp://172.26.205.13:8081` (the WSL VM's IP, reachable from the emulator through the Windows host) → bundle built (1291 modules) and the app launched.
+4. On launch Expo Go logged `ERROR expo-notifications: Android Push notifications (remote notifications) functionality … was removed from Expo Go with the release of SDK 53` and showed a LogBox toast that covered the "+" button. This is emitted on import and concerns remote push only. **Change:** `LogBox.ignoreLogs(['expo-notifications: Android Push notifications'])` in `src/app/_layout.tsx` (with comment). The message still appears in the Metro terminal.
+5. Restarted Metro without `CI=1` (watch mode) for hot reload.
+
+### Result — acceptance tests actually performed (Android 8.0 emulator, Expo Go)
+
+| # | Test | Evidence | Result |
+|---|---|---|---|
+| 1 | Create categories "Work", "Home" | category list | ✅ |
+| 2 | Empty category name | "Category name is required." | ✅ rejected |
+| 3 | Duplicate "work" (vs "Work") | "A category named "work" already exists." (screenshot) | ✅ rejected |
+| 4 | Rename "Home" → "Personal" | list + filter chips updated | ✅ |
+| 5 | Save task with empty title | "Title is required.", not saved | ✅ |
+| 6 | Create "Submit mobile development assignment" (Work, description, due = next full hour 00:00) | list row shows title, Work chip, "Sun, Oct 11, 12:00 AM"; `dumpsys alarm`: 1× `RTC_WAKEUP … tag=*walarm*:expo.modules.notifications.NOTIFICATION_EVENT when=2026-10-11 00:00:00` | ✅ scheduled |
+| 7 | Picking a past date (Oct 10 00:00) in the editor | warning "This time is in the past — … no reminder will be scheduled." | ✅ |
+| 8 | Change due date → 23:15 (date + time dialogs) | still exactly **1** expo alarm, now `when=2026-10-10 23:15:00` | ✅ rescheduled, no duplicate |
+| 9 | Create task with due date ("Buy groceries") | expo alarms 1 → 2 | ✅ |
+| 10 | Create task without due date ("Read chapter 5") | alarms stay 2 | ✅ none scheduled |
+| 11 | Complete "Buy groceries" from the list | 2 → 1 | ✅ cancelled |
+| 12 | Reopen it | 1 → 2 | ✅ rescheduled |
+| 13 | Delete it (confirmation dialog) | 2 → 1, row gone | ✅ cancelled |
+| 14 | **Delivery** at 23:15 with app in background (Home pressed) | `dumpsys notification`: `pkg=host.exp.exponent tag=task-1 … channel=…/task-reminders`, `android.text=Task reminder: Submit mobile development assignment`; visible in the notification shade (screenshot) | ✅ **delivered** |
+| 15 | Tap the notification | app opened on "Edit task" for that task | ✅ |
+| 16 | Unsaved changes + Android back | "Discard changes? / You have unsaved changes to this task." → Discard → title unchanged | ✅ |
+| 17 | Set future due date, then switch due date off | pending alarms 1 → 0 | ✅ cancelled |
+| 18 | Filters: Pending / Completed / Work / Uncategorized / Pending+Work / All+Any | each showed exactly the expected tasks | ✅ |
+| 19 | Delete category "Work" (used by 1 task) | dialog "1 task will be kept and become uncategorized."; task still listed, appears under "Uncategorized" | ✅ |
+| 20 | **Persistence:** `am force-stop host.exp.exponent` (process gone) and relaunch | tasks, completion state and categories intact | ✅ |
+| 21 | On-device SQL check (`sqlite3 …/files/SQLite/taskflow.db`) | `user_version=1`; deleted task 2 and category 1 absent; task 1 `category_id` NULL | ✅ |
+| 22 | **Reboot:** schedule 23:25, `adb reboot` (uptime afterwards 43 s → real reboot), **app not opened** | after boot: expo alarm `when=2026-10-10 23:25:00` present; logcat `Start proc …host.exp.exponent for broadcast host.exp.exponent/.notifications.receivers.SchedulingTriggerReceiver`; at 23:25 notification `tag=task-1` posted while the launcher was the resumed activity | ✅ restored and delivered *in Expo Go* |
+| 23 | **Permission denied:** turned Expo Go notifications Off in system settings, relaunched | reconcile `permission: "denied"`; banner "Notifications are off, so due-date reminders won't be delivered. Tasks are still saved." | ✅ no crash |
+| 24 | Create "Pay rent" with due date while denied | alert "Task saved, but notifications are not allowed, so no reminder was scheduled."; task listed; 0 alarms | ✅ |
+| 25 | Re-enable notifications, relaunch | reconcile `scheduled: [4]`, 1 alarm | ✅ startup reconciliation scheduled the missed reminder |
+| 26 | Relaunch again (after force-stop) | reconcile said `kept: [4]` but **0 alarms** | ❌ **bug → Entry 9** |
+
+Important caveats:
+- Test 22 proves restoration **in Expo Go**, whose boot receiver is Expo Go's own `SchedulingTriggerReceiver`. In a development/standalone build the receiver is the library's `NotificationsService` (Entry 2). Same library family, different host app → still needs confirming on a development build.
+- The alarm-count command initially matched any line containing the tag, including `dumpsys alarm`'s *history statistics*. After the first alarm fired, one stale stats line was counted (seen after test 14). Counts before 23:15 were unaffected because no expo alarm had fired yet. From test 17 on I counted only pending entries (`tag=*walarm*:…`).
+- Android 13+ runtime permission prompt, exact-alarm behaviour on Android 12+/14+, and iOS were **not** tested.
+
+### Problems / Errors
+- adb server conflict (fixed), IPv4 localhost forwarding (worked around), Expo Go push-removal log (suppressed), bug in test 26 (Entry 9).
+
+### Fixes Attempted
+- As listed above.
+
+### Current Status
+Partially completed (Android 8 / Expo Go verified; dev build, Android 13+, iOS pending)
+
+---
+
+## Entry 9 — Bug: reminders lost after force-stop were treated as still scheduled
+
+**Date:** 2026-10-10 23:30 (-03:00)
+
+### Prompt / Request
+(Found during acceptance test 26: "Verify that reconciliation does not produce duplicate reminders.")
+
+### Decision Summary
+Observed: after `am force-stop` and relaunch, startup reconciliation logged `{"kept": [4], "scheduled": []}` but `dumpsys alarm` showed **no** pending expo alarm (re-checked 10 s later: still 0).
+
+Investigation on the device (`adb root`):
+- SQLite: `4|Pay rent|2026-10-11T00:00:00.000Z|task-4` → the app believed a reminder existed.
+- `shared_prefs/expo.modules.notifications.SharedPreferencesNotificationsStore.xml` contained `notification_request-task-4` → expo-notifications' persistent request store still listed it.
+- AlarmManager: nothing.
+
+**Root cause:** Android deletes all AlarmManager alarms of a force-stopped app, but expo-notifications' request store is a SharedPreferences file and survives. `getAllScheduledNotificationsAsync()` on Android reads that store, so it reports requests whose alarm no longer exists. My reconciliation (Entry 4) trusted that list ("matches → keep") and therefore never re-armed the reminder. Users can cause the same situation from Settings → Force stop, and some OEM task killers do it too. The unit tests did not catch it because the fake treated "listed" and "will fire" as the same thing.
+
+**Fix (chosen):** reconciliation no longer trusts the listing for eligible tasks. It cancels app reminders that belong to non-eligible/missing tasks and **re-arms every eligible task** (`scheduleReminder` = cancel + schedule with the same deterministic `task-<id>` identifier). Because of the deterministic identifier this stays idempotent (still exactly one request per task). Cost: one cancel + schedule native call per eligible task per app start — negligible for a To-Do list.
+Alternatives considered: comparing with `dumpsys`-like alarm state (not available to JS); a native module to query AlarmManager (needs custom native code — disproportionate).
+
+### Actions Performed
+- `src/notifications/reminders.ts`: rewrote `reconcileReminders()`; removed `kept` from `ReconcileReport`; updated comments (payload `dueDateTime` is now used for display only).
+- `src/state/TaskStore.tsx`: `reconcile()` derives active reminders from `report.scheduled`.
+- `src/test/fakeNotifications.ts`: fake now separates `scheduled` (library store) from `alarms` (OS) and has `forceStop()`.
+- Tests: updated "repeated reconciliation" and "startup reconciliation" expectations; **new** test "re-arms reminders whose OS alarm was lost although the store still lists them (force-stop)".
+- Verified the new test **fails against the previous `reminders.ts`** (`git show HEAD:… > reminders.ts`, `npx jest -t force-stop` → 1 failed) and passes with the fix.
+- `npx jest` 42/42, `npx tsc --noEmit` exit 0, `npx expo lint` clean.
+- **On device**, 3 cycles of force-stop → relaunch: after each force-stop `pending=0`; after each relaunch reconcile `scheduled: [4]` and `pending=1` (`when=2026-10-11 00:00:00`). No duplicates.
+
+### Result
+Fixed and verified on the emulator and in unit tests.
+
+### Problems / Errors
+- Wrong assumption: "listed by `getAllScheduledNotificationsAsync()` ⇒ will fire".
+
+### Fixes Attempted
+1. Original design (trust listing) — failed on device.
+2. Always re-arm eligible tasks at startup — works.
+
+### Current Status
+Completed

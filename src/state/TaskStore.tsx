@@ -115,7 +115,7 @@ export function TaskStoreProvider({ children }: { children: ReactNode }) {
     const report = await reconcileReminders(all);
     setPermission(report.permission);
     // Keep notification_id in SQLite consistent with what is actually scheduled.
-    const active = new Set([...report.kept, ...report.scheduled]);
+    const active = new Set(report.scheduled);
     for (const task of all) {
       const expected = active.has(task.id) ? reminderIdentifier(task.id) : null;
       if (task.notificationId !== expected) {
